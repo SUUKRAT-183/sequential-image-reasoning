@@ -4,7 +4,8 @@ Milestone 2: Multi-image upload + CLIP embeddings.
 Images are uploaded in order, converted to embeddings using a
 pretrained CLIP model, and the embedding shape/preview is shown per image.
 """
-
+from pipeline.image_processor import build_processed_sequence
+from pipeline.prompt_builder import build_sequence_context
 import streamlit as st
 import torch
 from utils.image_utils import load_images_in_order
@@ -126,7 +127,17 @@ for i, caption in enumerate(captions):
     position = i + 1
     st.write(f"**Image {position}:** {caption}")
 
+# --- Build unified ordered sequence ---
+filenames = [f.name for f in uploaded_files]
+processed_images = build_processed_sequence(filenames, embeddings, captions)
+
+st.subheader("Ordered Sequence Context")
+st.caption("This is the exact text block that will be sent to the LLM in Milestone 6.")
+
+sequence_context = build_sequence_context(processed_images)
+st.text(sequence_context)
+
 st.divider()
 st.write(
-    "Captions generated. Ordered sequence representation comes in Milestone 5."
+    "Ordered sequence representation built. LLM integration comes in Milestone 6."
 )
