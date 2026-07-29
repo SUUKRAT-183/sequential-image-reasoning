@@ -4,12 +4,14 @@ Milestone 2: Multi-image upload + CLIP embeddings.
 Images are uploaded in order, converted to embeddings using a
 pretrained CLIP model, and the embedding shape/preview is shown per image.
 """
-from pipeline.image_processor import build_processed_sequence
-from pipeline.prompt_builder import build_sequence_context
+
 import streamlit as st
 import torch
 from utils.image_utils import load_images_in_order
 from models.clip_encoder import ClipEncoder
+from pipeline.image_processor import build_processed_sequence
+from pipeline.prompt_builder import build_sequence_context
+from models.llm_client import GeminiClient
 
 st.set_page_config(page_title="Sequential Image Reasoning", layout="wide")
 
@@ -138,6 +140,25 @@ sequence_context = build_sequence_context(processed_images)
 st.text(sequence_context)
 
 st.divider()
-st.write(
-    "Ordered sequence representation built. LLM integration comes in Milestone 6."
-)
+
+
+@st.cache_resource
+def load_llm_client() -> GeminiClient:
+    """
+    Same caching pattern as CLIP/BLIP — create the Gemini client once,
+    reuse across reruns, rather than re-reading .env and reconfiguring
+    the SDK on every single interaction.
+    """
+    return GeminiClient()
+
+
+st.subheader("Ask About the Sequence")
+
+question = st.text_input("Your question", placeholder="What happened across these images?")
+
+if st.button("Ask") and question:
+    llm_client = load_llm_client()
+    with st.spinner("Thinking..."):
+        answer = llm_client.generate_answer(sequence_context, images, question)
+    st.write("**Answer:**")
+    st.write(answer)
