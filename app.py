@@ -100,7 +100,33 @@ similarity_df = pd.DataFrame(
 
 st.dataframe(similarity_df.style.format("{:.2f}").background_gradient(cmap="Blues"))
 
+from models.blip_captioner import BlipCaptioner
+
+# ... (keep everything above unchanged) ...
+
+@st.cache_resource
+def load_blip_captioner() -> BlipCaptioner:
+    """
+    Same caching reasoning as load_clip_encoder — load BLIP once,
+    reuse across Streamlit reruns instead of reloading from disk
+    every interaction.
+    """
+    return BlipCaptioner()
+
+
+# --- BLIP Captions ---
+st.subheader("Captions")
+
+captioner = load_blip_captioner()
+
+with st.spinner("Generating captions..."):
+    captions = captioner.generate_captions(images)
+
+for i, caption in enumerate(captions):
+    position = i + 1
+    st.write(f"**Image {position}:** {caption}")
+
 st.divider()
 st.write(
-    "Similarity matrix generated. BLIP captioning comes in Milestone 4."
+    "Captions generated. Ordered sequence representation comes in Milestone 5."
 )
