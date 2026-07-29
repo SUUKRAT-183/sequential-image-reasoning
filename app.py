@@ -77,7 +77,30 @@ for i, emb in enumerate(embeddings):
         st.write(f"First 5 values: `{emb[:5].tolist()}`")
         st.write(f"Norm (should be ~1.0 after normalization): `{emb.norm().item():.4f}`")
 
+import pandas as pd
+from pipeline.similarity import compute_similarity_matrix
+
+# ... (keep everything above unchanged) ...
+
+# --- Similarity ---
+st.subheader("Similarity Matrix")
+
+similarity_matrix = compute_similarity_matrix(embeddings)
+
+# Convert to a labeled DataFrame purely for display purposes — this
+# doesn't affect the underlying tensor math, just makes the table
+# readable with "Image 1", "Image 2" row/column labels instead of
+# raw indices.
+labels = [f"Image {i + 1}" for i in range(len(images))]
+similarity_df = pd.DataFrame(
+    similarity_matrix.numpy(),
+    index=labels,
+    columns=labels,
+)
+
+st.dataframe(similarity_df.style.format("{:.2f}").background_gradient(cmap="Blues"))
+
 st.divider()
 st.write(
-    "Embeddings generated. Similarity comparison comes in Milestone 3."
+    "Similarity matrix generated. BLIP captioning comes in Milestone 4."
 )
