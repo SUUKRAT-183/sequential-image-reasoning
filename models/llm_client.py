@@ -8,21 +8,45 @@ Google's current Gen AI SDK (google-genai package).
 """
 
 import os
-import time
 from abc import ABC, abstractmethod
 from typing import List
 from PIL import Image
 
 from google import genai
-from google.genai import errors as genai_errors
 from dotenv import load_dotenv
 
 load_dotenv()
 
 
+def _resize_for_llm(image: Image.Image, max_dimension: int = 1024) -> Image.Image:
+    """
+    Downscale an image so its longest side is at most max_dimension
+    pixels, preserving aspect ratio.
+
+    This significantly reduces upload payload size for large images
+    (especially screenshots, which can be several MB each) without
+    meaningfully hurting Gemini's ability to read text/UI content —
+    Gemini's vision encoder internally downsamples images anyway, so
+    sending ultra-high-resolution originals wastes bandwidth without
+    adding real understanding, and increases the risk of connection
+    errors when sending many images in one request.
+    """
+    width, height = image.size
+    if max(width, height) <= max_dimension:
+        return image  # already small enough, no resizing needed
+
+    scale = max_dimension / max(width, height)
+    new_size = (int(width * scale), int(height * scale))
+    return image.resize(new_size, Image.LANCZOS)
+
+
 class LLMClient(ABC):
     """
     Abstract base class every LLM provider implementation must follow.
+
+    Using an ABC here means Python enforces the contract at the
+    language level — any subclass that forgets to implement
+    generate_answer will fail immediately, not silently at runtime.
     """
 
     @abstractmethod
@@ -38,19 +62,15 @@ class LLMClient(ABC):
 class GeminiClient(LLMClient):
     """
     Gemini implementation of LLMClient, using Google's current Gen AI SDK.
+
+    Sends the ordered caption context AND the raw (resized) images
+    together, so Gemini can reason using both BLIP's captions and its
+    own direct vision understanding of each image — important for
+    image types like screenshots where BLIP's captions are weak but
+    Gemini can still read/interpret the actual pixels.
     """
 
-    # Google's Flash models get renamed/deprecated fairly often. If the
-    # primary model is temporarily overloaded (503) or unavailable, we
-    # fall back to trying the next name in this list before giving up.
-    MODEL_CANDIDATES = [
-        "gemini-3.5-flash",
-        "gemini-flash-latest",
-        "gemini-3.1-flash-lite",
-    ]
-
-    MAX_RETRIES = 3
-    RETRY_DELAY_SECONDS = 5
+    MODEL_NAME = "gemini-3.5-flash"
 
     def __init__(self):
         api_key = os.getenv("GEMINI_API_KEY")
@@ -75,44 +95,13 @@ class GeminiClient(LLMClient):
 
         for i, img in enumerate(images):
             contents.append(f"Image {i + 1}:")
-            contents.append(img)
+            contents.append(_resize_for_llm(img))
 
         contents.append(f"\nQuestion: {question}")
 
-        last_error = None
-
-        # Try each candidate model in order. This handles both:
-        # (a) a specific model name being deprecated/renamed, and
-        # (b) a specific model being temporarily overloaded (503) while
-        #     another equivalent model is available.
-        for model_name in self.MODEL_CANDIDATES:
-            for attempt in range(self.MAX_RETRIES):
-                try:
-                    response = self.client.models.generate_content(
-                        model=model_name,
-                        contents=contents,
-                    )
-                    return response.text
-
-                except genai_errors.ServerError as e:
-                    # 503 = temporarily overloaded. Worth retrying the
-                    # SAME model a couple of times before moving to the
-                    # next candidate, since it may free up quickly.
-                    last_error = e
-                    if attempt < self.MAX_RETRIES - 1:
-                        time.sleep(self.RETRY_DELAY_SECONDS)
-                    continue
-
-                except genai_errors.ClientError as e:
-                    # 404 = model doesn't exist/deprecated. No point
-                    # retrying the same model — move straight to the
-                    # next candidate in the list.
-                    last_error = e
-                    break
-
-        # If we've exhausted every candidate model and every retry,
-        # surface the last error so it's visible in the Streamlit UI
-        # rather than failing silently.
-        raise RuntimeError(
-            f"All Gemini model candidates failed. Last error: {last_error}"
+        response = self.client.models.generate_content(
+            model=self.MODEL_NAME,
+            contents=contents,
         )
+
+        return response.text

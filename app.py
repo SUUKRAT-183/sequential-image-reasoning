@@ -1,43 +1,61 @@
 """
-Milestone 2: Multi-image upload + CLIP embeddings.
+Milestone 7: Final integrated pipeline.
 
-Images are uploaded in order, converted to embeddings using a
-pretrained CLIP model, and the embedding shape/preview is shown per image.
+Upload images -> preserve order -> CLIP embeddings -> similarity ->
+BLIP captions -> ordered context -> user question -> Gemini answer.
 """
 
 import streamlit as st
-import torch
+import pandas as pd
+
 from utils.image_utils import load_images_in_order
 from models.clip_encoder import ClipEncoder
+from models.blip_captioner import BlipCaptioner
+from models.llm_client import GeminiClient
+from pipeline.similarity import compute_similarity_matrix
 from pipeline.image_processor import build_processed_sequence
 from pipeline.prompt_builder import build_sequence_context
-from models.llm_client import GeminiClient
 
 st.set_page_config(page_title="Sequential Image Reasoning", layout="wide")
 
-st.title("Sequential Multi-Image Reasoning")
-st.caption("Milestone 2: CLIP embeddings")
 
+# --- Cached model loaders ---
 
 @st.cache_resource
 def load_clip_encoder() -> ClipEncoder:
-    """
-    Load the CLIP model once and cache it across Streamlit reruns.
-
-    Streamlit reruns the ENTIRE script top-to-bottom every time you
-    interact with the UI (upload a file, click a button, etc.). Without
-    caching, we'd reload the CLIP model from disk on every single
-    interaction — slow, and wasteful of VRAM since we'd keep creating
-    new copies of the model in memory.
-
-    @st.cache_resource tells Streamlit: "run this function once, keep
-    the result alive across reruns, and give every rerun the same
-    object instead of recreating it."
-    """
     return ClipEncoder()
 
 
-# --- Upload ---
+@st.cache_resource
+def load_blip_captioner() -> BlipCaptioner:
+    return BlipCaptioner()
+
+
+@st.cache_resource
+def load_llm_client() -> GeminiClient:
+    return GeminiClient()
+
+
+# --- Sidebar: pipeline status ---
+with st.sidebar:
+    st.header("Pipeline Status")
+    encoder_preview = load_clip_encoder()
+    st.write(f"**Device:** {encoder_preview.device}")
+    st.write("**CLIP:** openai/clip-vit-base-patch32")
+    st.write("**BLIP:** Salesforce/blip-image-captioning-base")
+    st.write("**LLM:** Gemini (gemini-3.5-flash)")
+    st.caption("Models are loaded once and cached across reruns.")
+
+
+# --- Main title ---
+st.title("Sequential Multi-Image Reasoning")
+st.caption(
+    "Upload ordered images. The system embeds, compares, captions, "
+    "and reasons across the full sequence."
+)
+
+# --- Step 1: Upload ---
+st.header("Step 1 — Upload Images in Order")
 uploaded_files = st.file_uploader(
     "Upload images in the order you want them processed",
     type=["png", "jpg", "jpeg"],
@@ -45,120 +63,98 @@ uploaded_files = st.file_uploader(
 )
 
 if not uploaded_files:
-    st.info("Upload two or more images to see them in sequence.")
+    st.info("Upload two or more images to begin.")
     st.stop()
 
 images = load_images_in_order(uploaded_files)
+filenames = [f.name for f in uploaded_files]
 
-st.subheader(f"Sequence ({len(images)} images)")
+if len(images) > 8:
+    st.warning(
+        f"You've uploaded {len(images)} images. Large batches may take "
+        "longer to process and images are automatically resized before "
+        "being sent to the LLM to avoid connection issues."
+    )
 
-# --- Ordered preview ---
-cols_per_row = 4
-for row_start in range(0, len(images), cols_per_row):
-    row_images = images[row_start: row_start + cols_per_row]
-    cols = st.columns(cols_per_row)
-    for i, img in enumerate(row_images):
-        position = row_start + i + 1
-        with cols[i]:
-            st.image(img, caption=f"Image {position}")
+with st.expander(f"Preview sequence ({len(images)} images)", expanded=True):
+    cols_per_row = 4
+    for row_start in range(0, len(images), cols_per_row):
+        row_images = images[row_start: row_start + cols_per_row]
+        cols = st.columns(cols_per_row)
+        for i, img in enumerate(row_images):
+            position = row_start + i + 1
+            with cols[i]:
+                st.image(img, caption=f"Image {position}")
 
 st.divider()
 
-# --- CLIP Embeddings ---
-st.subheader("CLIP Embeddings")
+# --- Step 2: CLIP embeddings + similarity ---
+st.header("Step 2 — Visual Embeddings & Similarity")
 
 encoder = load_clip_encoder()
-st.caption(f"Running on device: **{encoder.device}**")
-
-with st.spinner("Generating embeddings..."):
+with st.spinner("Generating CLIP embeddings..."):
     embeddings = encoder.encode_images(images)
 
-for i, emb in enumerate(embeddings):
-    position = i + 1
-    with st.expander(f"Image {position} — embedding info"):
-        st.write(f"Shape: `{tuple(emb.shape)}`")
-        st.write(f"First 5 values: `{emb[:5].tolist()}`")
-        st.write(f"Norm (should be ~1.0 after normalization): `{emb.norm().item():.4f}`")
-
-import pandas as pd
-from pipeline.similarity import compute_similarity_matrix
-
-# ... (keep everything above unchanged) ...
-
-# --- Similarity ---
-st.subheader("Similarity Matrix")
+with st.expander("Embedding details (shape, sample values)", expanded=True):
+    for i, emb in enumerate(embeddings):
+        position = i + 1
+        st.write(
+            f"**Image {position}** — shape `{tuple(emb.shape)}`, "
+            f"norm `{emb.norm().item():.4f}`"
+        )
+        st.caption(f"First 5 values: {emb[:5].tolist()}")
 
 similarity_matrix = compute_similarity_matrix(embeddings)
-
-# Convert to a labeled DataFrame purely for display purposes — this
-# doesn't affect the underlying tensor math, just makes the table
-# readable with "Image 1", "Image 2" row/column labels instead of
-# raw indices.
 labels = [f"Image {i + 1}" for i in range(len(images))]
 similarity_df = pd.DataFrame(
-    similarity_matrix.numpy(),
-    index=labels,
-    columns=labels,
+    similarity_matrix.numpy(), index=labels, columns=labels
 )
 
-st.dataframe(similarity_df.style.format("{:.2f}").background_gradient(cmap="Blues"))
+with st.expander("Similarity matrix", expanded=True):
+    st.dataframe(
+        similarity_df.style.format("{:.2f}").background_gradient(cmap="Blues")
+    )
 
-from models.blip_captioner import BlipCaptioner
+st.divider()
 
-# ... (keep everything above unchanged) ...
-
-@st.cache_resource
-def load_blip_captioner() -> BlipCaptioner:
-    """
-    Same caching reasoning as load_clip_encoder — load BLIP once,
-    reuse across Streamlit reruns instead of reloading from disk
-    every interaction.
-    """
-    return BlipCaptioner()
-
-
-# --- BLIP Captions ---
-st.subheader("Captions")
+# --- Step 3: BLIP captions ---
+st.header("Step 3 — Captions")
 
 captioner = load_blip_captioner()
-
 with st.spinner("Generating captions..."):
     captions = captioner.generate_captions(images)
 
-for i, caption in enumerate(captions):
-    position = i + 1
-    st.write(f"**Image {position}:** {caption}")
-
-# --- Build unified ordered sequence ---
-filenames = [f.name for f in uploaded_files]
-processed_images = build_processed_sequence(filenames, embeddings, captions)
-
-st.subheader("Ordered Sequence Context")
-st.caption("This is the exact text block that will be sent to the LLM in Milestone 6.")
-
-sequence_context = build_sequence_context(processed_images)
-st.text(sequence_context)
+with st.expander("Captions per image", expanded=True):
+    for i, caption in enumerate(captions):
+        position = i + 1
+        st.write(f"**Image {position}:** {caption}")
 
 st.divider()
 
+# --- Step 4: Ordered sequence context ---
+st.header("Step 4 — Ordered Sequence Context")
 
-@st.cache_resource
-def load_llm_client() -> GeminiClient:
-    """
-    Same caching pattern as CLIP/BLIP — create the Gemini client once,
-    reuse across reruns, rather than re-reading .env and reconfiguring
-    the SDK on every single interaction.
-    """
-    return GeminiClient()
+processed_images = build_processed_sequence(filenames, embeddings, captions)
+sequence_context = build_sequence_context(processed_images)
 
+with st.expander("Text context sent to the LLM", expanded=True):
+    st.text(sequence_context)
 
-st.subheader("Ask About the Sequence")
+st.divider()
 
-question = st.text_input("Your question", placeholder="What happened across these images?")
+# --- Step 5: Ask the LLM ---
+st.header("Step 5 — Ask About the Sequence")
+
+question = st.text_input(
+    "Your question", placeholder="What happened across these images?"
+)
 
 if st.button("Ask") and question:
     llm_client = load_llm_client()
     with st.spinner("Thinking..."):
-        answer = llm_client.generate_answer(sequence_context, images, question)
-    st.write("**Answer:**")
-    st.write(answer)
+        try:
+            answer = llm_client.generate_answer(sequence_context, images, question)
+            st.subheader("Answer")
+            st.write(answer)
+        except Exception as e:
+            st.error(f"Something went wrong while contacting the LLM: {e}")
